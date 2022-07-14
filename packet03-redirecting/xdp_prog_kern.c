@@ -32,18 +32,44 @@ static __always_inline void swap_src_dst_mac(struct ethhdr *eth)
 {
 	/* Assignment 1: swap source and destination addresses in the eth.
 	 * For simplicity you can use the memcpy macro defined above */
+	unsigned char	tmp[ETH_ALEN];
+	memcpy(tmp, eth->h_source, ETH_ALEN);
+	memcpy(eth->h_source, eth->h_dest, ETH_ALEN);
+	memcpy(eth->h_dest, tmp, ETH_ALEN);
 }
 
 static __always_inline void swap_src_dst_ipv6(struct ipv6hdr *ipv6)
 {
 	/* Assignment 1: swap source and destination addresses in the iphv6dr */
+	struct	in6_addr tmp = ipv6->saddr;
+	ipv6->saddr = ipv6->daddr;
+	ipv6->daddr = tmp;
 }
 
 static __always_inline void swap_src_dst_ipv4(struct iphdr *iphdr)
 {
 	/* Assignment 1: swap source and destination addresses in the iphdr */
+	__be32 tmp = iphdr->saddr;
+	iphdr->saddr = iphdr->daddr;
+	iphdr->daddr = tmp;
 }
+static __always_inline __u16 csum_fold_helper(__u32 csum)
+{
+	__u32 sum;
+	sum = (csum >> 16) + (csum & 0xffff);
+	sum += (sum >> 16);
+	return ~sum;
+}
+static __always_inline __u16 icmp_checksum_diff(
+		__u16 seed,
+		struct icmphdr_common *icmphdr_new,
+		struct icmphdr_common *icmphdr_old)
+{
+	__u32 csum, size = sizeof(struct icmphdr_common);
 
+	csum = bpf_csum_diff((__be32 *)icmphdr_old, size, (__be32 *)icmphdr_new, size, seed);
+	return csum_fold_helper(csum);
+}
 /* Implement packet03/assignment-1 in this section */
 SEC("xdp_icmp_echo")
 int xdp_icmp_echo_func(struct xdp_md *ctx)
@@ -103,6 +129,13 @@ int xdp_icmp_echo_func(struct xdp_md *ctx)
 
 	/* Assignment 1: patch the packet and update the checksum. You can use
 	 * the echo_reply variable defined above to fix the ICMP Type field. */
+	unsigned short old_csum = icmphdr->cksum;
+	icmphdr->cksum = 0;
+	struct icmphdr_common oldhdr = *icmphdr;
+
+	icmphdr->type = echo_reply;
+	icmphdr->cksum = icmp_checksum_diff(~old_csum, icmphdr, &oldhdr);
+
 
 	action = XDP_TX;
 
@@ -123,6 +156,13 @@ int xdp_redirect_func(struct xdp_md *ctx)
 	/* unsigned char dst[ETH_ALEN] = {} */	/* Assignment 2: fill in with the MAC address of the left inner interface */
 	/* unsigned ifindex = 0; */		/* Assignment 2: fill in with the ifindex of the left interface */
 
+	/* left eth 9e:a7:f0:2a:80:91 */
+	unsigned char dst[ETH_ALEN + 1] = {0x9e,0xa7,0xf0,0x2a,0x80,0x91};
+	/* 
+	   cat /sys/class/net/left/ifindex
+	*/
+	unsigned ifindex = 6;
+
 	/* These keep track of the next header type and iterator pointer */
 	nh.pos = data;
 
@@ -133,7 +173,8 @@ int xdp_redirect_func(struct xdp_md *ctx)
 
 	/* Assignment 2: set a proper destination address and call the
 	 * bpf_redirect() with proper parameters, action = bpf_redirect(...) */
-
+	memcpy(eth->h_dest, dst, ETH_ALEN);
+	action = bpf_redirect(ifindex, 0);
 out:
 	return xdp_stats_record_action(ctx, action);
 }
